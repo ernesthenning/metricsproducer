@@ -1,31 +1,43 @@
 package com.example.metricsproducer.service;
 
 import com.example.metricsproducer.model.Metric;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.actuate.metrics.MetricsEndpoint;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class MetricsService {
 
-    private final RestTemplate restTemplate;
-    private final String urlMetrics = "http://localhost:8080/actuator/metrics";
+    private final KafkaTemplate<String, Metric> kafkaTemplate;
+    private final MetricsEndpoint metricsEndpoint;
     private final List<String> metrics = List.of("disk.free", "disk.total");
 
-    public List<Metric> getAllMetrics() throws JsonProcessingException {
-        List<Metric> result = new ArrayList<>();
+    @Scheduled(cron = "@hourly")
+    public void sendMetrics() {
+        List<Metric> data = new ArrayList<>();
         for(String metric : metrics) {
-            String json = restTemplate.getForObject(urlMetrics + "/" + metric, String.class);
-            ObjectMapper mapper = new ObjectMapper();
-            String value = mapper.readTree(json).get("value").asText();
-            result.add(new Metric(metric, value));
+            data.add(new Metric(metric, metricsEndpoint.metric(metric, new ArrayList<>()).getMeasurements().get(0).getValue()));
         }
-        return result;
+        for(Metric metric : data) {
+            sendMetric(metric);
+        }
+    }
+
+    private void sendMetric(Metric metric) {
+        kafkaTemplate.send("metrics-topic", metric).whenComplete((result, e) -> {
+            if(e != null) {
+                throw new IllegalStateException();
+            }
+            final var sentResult = result.getProducerRecord().value();
+            log.info("Metric {}:{} sent to Kafka", sentResult.tag(), sentResult.value());
+        });
     }
 }
